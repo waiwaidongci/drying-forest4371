@@ -8,3 +8,10 @@ class RecordInput(BaseModel):
     values:dict
 class RecordBatch(BaseModel):
     records:list[RecordInput]=Field(min_length=1,max_length=1000)
+class ImportInput(BaseModel):
+    name:str=Field(min_length=2,max_length=160)
+    filename:str=Field(min_length=3,max_length=160)
+    description:str=Field(default='',max_length=2000)
+    file_size:int=Field(ge=1)
+    file_sha256:str=Field(min_length=64,max_length=64)
+    total_chunks:int=Field(ge=1)

@@ -15,6 +15,20 @@ RandomForest回归、训练内特征子集交叉验证与留出集MAE。为槐�
 5. 工艺试验备忘：分析师草案→负责人批准→阅读者下载批准快照。
 6. 审计：登录、来源修改、任务worker完成、业务说明批准等事件。
 
+## 分片续传导入
+
+补录文件超过内存时，用“干燥研究”页的“分片导入新来源”录入，不再受单批 1000 条限制。流程按 `创建会话 → 逐片上传 → 完成校验` 进行，整份通过才生成来源与样本。
+
+- 分片：默认 4 MiB 定长切片（`IMPORT_CHUNK_SIZE` 可调），最后一片按剩余字节；`PUT /imports/{id}/chunks/{index}` 支持乱序、重传与并发补片。
+- 一致性：创建时声明文件大小、分片数与全文件 SHA-256；每片可带 `X-Chunk-Sha256`。相同片号重复上传且内容相同只计一次；片号相同内容不同返回 409 冲突，不覆盖。
+- 判重：按逻辑记录（`reference`）判重；同号同值合并（`duplicate_rows`），同号异值使整份文件拒绝，并返回冲突编号与行号。
+- 校验与发布：`POST /imports/{id}/complete` 仅在分片齐全后进入 `verifying`；作业独立进程流式读取拼装文件，先比对全文件 SHA-256，再逐行字段校验。全部通过后来源与样本在同一事务提交，会话从 `receiving/verifying` 转为 `ready`；任何失败整份拒绝，`rejected` 不产生来源。
+- 续传与恢复：分片先落盘再登记，已确认分片在中断后可继续补传；校验作业心跳超时会话可重试完成，重试不会新增来源，已完成会话重复提交为幂等。服务启动时会重新拉起没有存活作业的 `verifying` 会话。
+- 内存：解析与发布逐块进行，峰值与行数无关。百万行（42 MiB CSV）实测峰值约 68 MiB，低于 128 MiB 上限；`peak_rss_kib` 记录在会话上供核对。
+- 页面：显示分片进度、校验阶段（全文件校验/解析与判重/写入样本）、解析行数、合并与非法行数、峰值内存及拒绝原因（行号 + 编号 + 原因）。
+
+接口：`POST /imports`、`GET /imports`、`GET /imports/{id}`、`GET /imports/config`、`PUT /imports/{id}/chunks/{index}`、`POST /imports/{id}/complete|retry|cancel`。表 `import_sessions` / `import_chunks` 见 `backend/migrations/002_imports.sql`。
+
 ## 快速启动
 
 ```bash
@@ -101,7 +115,9 @@ backend/migrations/001_initial.sql
 | SEED_DEMO | `true` |
 | JWT_SECRET | `.env.example`演示值，部署前修改 |
 | DATABASE_URL / REDIS_URL | Compose内部连接，定义在compose的env锚点 |
-| ARTIFACT_DIR | `/artifacts`，后端worker共享 |
+| ARTIFACT_DIR | `/artifacts`，后端worker共享；分片与暂存文件位于其 `imports/` 下 |
+| IMPORT_CHUNK_SIZE | `4194304`（4 MiB），分片大小；前后端通过 `/imports/config` 对齐 |
+| IMPORT_RESUME | `true`，启动时清理过期分片并重新拉起没有存活作业的校验会话 |
 
 共享枚举：`backend/src/constants/enums.py` 与 `frontend/src/constants/enums.js` 都定义 admin/analyst/viewer、queued/running/completed/failed、draft/approved。后端service检查对应字符串；README为全量值说明。共享前端组件table/status/chart/business跨总览、结果、配置与复核复用；actions hook和format utils负责交互/格式。后端errors与rate_limit是两个中间件。
 
